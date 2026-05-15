@@ -16,15 +16,15 @@ import type { FieldMappingEntry } from '../../src/types';
 
 export class PdfFormFiller implements INodeType {
 	description: INodeTypeDescription = {
-		displayName: 'PDF Form Filler',
-		name: 'pdfFormFiller',
+		displayName: 'PDF Form Filler Flat',
+		name: 'pdfFormFillerFlat',
 		icon: 'file:pdf-form-filler.svg',
 		group: ['transform'],
 		version: 1,
 		subtitle: '={{ $parameter["operation"] }}',
-		description: 'Fill AcroForm PDF fields with JSON data',
+		description: 'Fill and flatten AcroForm PDF fields with JSON data',
 		defaults: {
-			name: 'PDF Form Filler',
+			name: 'PDF Form Filler Flat',
 		},
 		inputs: [NodeConnectionTypes.Main],
 		outputs: [NodeConnectionTypes.Main],
@@ -199,6 +199,55 @@ export class PdfFormFiller implements INodeType {
 				description:
 					'Global default date format for ISO date strings. Tokens: DD, D, MM, M, YYYY, YY.',
 			},
+			{
+				displayName: 'Flatten PDF',
+				name: 'flattenPdf',
+				type: 'boolean',
+				default: false,
+				displayOptions: {
+					show: {
+					operation: ['fillForm'],
+					},
+				},
+				description: 'Whether to flatten form fields into visible page content after filling',
+			},
+			{
+				displayName: 'Editable Page Widgets',
+				name: 'editablePageWidgets',
+				type: 'boolean',
+				default: false,
+				displayOptions: {
+					show: {
+					operation: ['fillForm'],
+					flattenPdf: [false],
+					},
+				},
+				description: 'Fill visible page widget annotations and generate appearances while keeping fields editable',
+			},
+			{
+				displayName: 'Flatten Strategy',
+				name: 'flattenStrategy',
+				type: 'options',
+				default: 'pageWidgets',
+				options: [
+					{
+					name: 'Burn Values Onto Page Widgets',
+					value: 'pageWidgets',
+					description: 'Draw values directly onto page widget positions and remove form annotations',
+					},
+					{
+					name: 'PDF-lib Form Flatten',
+					value: 'pdfLib',
+					description: 'Use pdf-lib form.flatten()',
+					},
+				],
+				displayOptions: {
+					show: {
+					operation: ['fillForm'],
+					flattenPdf: [true],
+					},
+				},
+			}
 		],
 	};
 
@@ -259,6 +308,23 @@ export class PdfFormFiller implements INodeType {
 						'outputFileName',
 						itemIndex,
 					) as string;
+					const flattenPdf = this.getNodeParameter(
+						'flattenPdf',
+						itemIndex,
+						false,
+					) as boolean;
+					
+					const editablePageWidgets = this.getNodeParameter(
+						'editablePageWidgets',
+						itemIndex,
+						false,
+					) as boolean;
+
+					const flattenStrategy = this.getNodeParameter(
+						'flattenStrategy',
+						itemIndex,
+						'pageWidgets',
+					) as 'pageWidgets' | 'pdfLib';
 
 					// Resolve mapping
 					const mappingSource = this.getNodeParameter(
@@ -306,7 +372,11 @@ export class PdfFormFiller implements INodeType {
 					const data = items[itemIndex].json as Record<string, unknown>;
 
 					// Fill the form
-					const adapter = new PdfLibAdapter();
+					const adapter = new PdfLibAdapter({
+						flattenPdf,
+						flattenStrategy,
+						editablePageWidgets,
+					});
 					const engine = new PdfFormFillerEngine(adapter, {
 						warnOnMissingValues,
 						defaultDateFormat,

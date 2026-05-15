@@ -11,3 +11,5 @@ test/manual/output/
 mnt/
 .claude/
 .vscode/
+*.tgz
+*.tgz

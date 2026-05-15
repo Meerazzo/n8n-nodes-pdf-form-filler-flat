@@ -1,16 +1,28 @@
 import {
-  PDFDocument,
-  PDFForm,
-  PDFTextField,
+  PDFArray,
   PDFCheckBox,
-  PDFRadioGroup,
+  PDFDict,
+  PDFDocument,
   PDFDropdown,
+  PDFForm,
+  PDFName,
   PDFOptionList,
+  PDFRadioGroup,
+  PDFString,
+  PDFTextField,
+  StandardFonts,
+  rgb,
 } from 'pdf-lib';
 
-import { FieldInfo, IPdfAdapter, PdfFieldType } from '../types';
+import { FieldInfo, IPdfAdapter, PdfFieldType, FieldMappingEntry } from '../types';
 import { PdfLoadError, NoFormError, FieldNotFoundError } from '../errors/PdfFormFillerError';
 import { FieldTypeDetector } from './FieldTypeDetector';
+
+export interface PdfLibAdapterOptions {
+  flattenPdf?: boolean;
+  flattenStrategy?: 'pdfLib' | 'pageWidgets';
+  editablePageWidgets?: boolean;
+}
 
 /**
  * Wraps the pdf-lib library behind the IPdfAdapter interface.
@@ -22,6 +34,10 @@ import { FieldTypeDetector } from './FieldTypeDetector';
 export class PdfLibAdapter implements IPdfAdapter {
   private pdfDoc: PDFDocument | null = null;
   private form: PDFForm | null = null;
+  private pageHints = new Map<string, number>();
+  private pageWidgetsBurned = false;
+
+  constructor(private readonly options: PdfLibAdapterOptions = {}) {}
 
   /**
    * Load a PDF document from bytes.
@@ -102,6 +118,24 @@ export class PdfLibAdapter implements IPdfAdapter {
       return this.getFieldOptionsFromField(field, type);
     } catch {
       return null;
+    }
+  }
+
+  setPageHints(mapping: FieldMappingEntry[]): void {
+    this.pageHints.clear();
+
+    for (const entry of mapping) {
+      let pageIndex: number | undefined;
+
+      if (typeof entry.pageIndex === 'number') {
+        pageIndex = entry.pageIndex;
+      } else if (typeof entry.pageNumber === 'number') {
+        pageIndex = entry.pageNumber - 1;
+      }
+
+      if (pageIndex !== undefined && Number.isFinite(pageIndex)) {
+        this.pageHints.set(entry.pdfField, Math.trunc(pageIndex));
+      }
     }
   }
 
@@ -186,6 +220,454 @@ export class PdfLibAdapter implements IPdfAdapter {
     }
   }
 
+  private repairWidgetPageReferences(): void {
+    if (!this.pdfDoc || !this.form) {
+      return;
+    }
+
+    const pages = this.pdfDoc.getPages();
+
+    if (pages.length === 0) {
+      return;
+    }
+
+    for (const field of this.form.getFields()) {
+      const fieldName = field.getName();
+
+      const hintedPageIndex = this.pageHints.get(fieldName);
+
+      // If no page hint is provided, fallback to page 1 only for widgets
+      // that have no /P reference. This prevents flatten() from crashing
+      // on blank orphan widgets.
+      const targetPageIndex = hintedPageIndex ?? 0;
+      const safePageIndex = Math.min(
+        Math.max(targetPageIndex, 0),
+        pages.length - 1,
+      );
+
+      const targetPage = pages[safePageIndex];
+
+      const acroField = (field as any).acroField;
+      const widgets = acroField?.getWidgets?.() ?? [];
+
+      for (const widget of widgets) {
+        const existingPageRef =
+          typeof widget.P === 'function' ? widget.P() : undefined;
+
+        // If the user gave a page hint, force it.
+        // Otherwise, only repair widgets that have no page reference.
+        if (hintedPageIndex !== undefined || !existingPageRef) {
+          widget.dict.set(PDFName.of('P'), targetPage.ref);
+        }
+      }
+    }
+  }
+
+  async burnMappedValuesOntoPageWidgets(
+    mapping: Array<{ dataKey: string; pdfField: string }>,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    if (!this.pdfDoc) {
+      throw new PdfLoadError('No document loaded');
+    }
+
+    if (!this.options.flattenPdf || this.options.flattenStrategy !== 'pageWidgets') {
+      return;
+    }
+
+    const font = await this.pdfDoc.embedFont(StandardFonts.Helvetica);
+    const valuesByPdfField = new Map<string, string>();
+
+    for (const entry of mapping) {
+      const value = this.getValueByPath(data, entry.dataKey);
+
+      if (value === undefined || value === null || value === '') {
+        continue;
+      }
+
+      valuesByPdfField.set(entry.pdfField, String(value));
+    }
+
+    for (const page of this.pdfDoc.getPages()) {
+      const annots = (page.node as any).Annots?.();
+
+      if (!annots || typeof annots.size !== 'function') {
+        continue;
+      }
+
+      for (let i = 0; i < annots.size(); i++) {
+        const annotRef = annots.get(i);
+        const annot = this.pdfDoc.context.lookup(annotRef) as PDFDict | undefined;
+
+        if (!annot) {
+          continue;
+        }
+
+        const subtype = annot.get(PDFName.of('Subtype'));
+
+        if (String(subtype) !== '/Widget') {
+          continue;
+        }
+
+        const rect = this.lookupOptionalArray(annot.get(PDFName.of('Rect')));
+        const coords = this.readRect(rect);
+
+        if (!coords) {
+          continue;
+        }
+
+        const [x0, y0, x1, y1] = coords;
+        const width = x1 - x0;
+        const height = y1 - y0;
+
+        if (width <= 0 || height <= 0) {
+          continue;
+        }
+
+        // Recrée visuellement les zones grises du CERFA en dur dans la page
+        page.drawRectangle({
+          x: x0,
+          y: y0,
+          width,
+          height,
+          color: rgb(0.82, 0.84, 0.88),
+        });
+
+        const fieldName = this.decodePdfText(annot.get(PDFName.of('T')));
+
+        if (!fieldName) {
+          continue;
+        }
+
+        const value = valuesByPdfField.get(fieldName);
+
+        if (!value) {
+          continue;
+        }
+
+        const fieldType = String(annot.get(PDFName.of('FT')));
+
+        if (fieldType === '/Btn') {
+          const normalized = value.toLowerCase();
+
+          if (['true', '1', 'yes', 'oui', 'x'].includes(normalized)) {
+            page.drawText('X', {
+              x: x0 + 1.5,
+              y: y0 + 1,
+              size: Math.max(6, Math.min(9, height * 0.8)),
+              font,
+              color: rgb(0, 0, 0),
+            });
+          }
+
+          continue;
+        }
+
+        const size = Math.max(6, Math.min(8, height * 0.72));
+
+        page.drawText(value, {
+          x: x0 + 2,
+          y: y0 + Math.max(1.5, (height - size) / 2),
+          size,
+          font,
+          color: rgb(0, 0, 0),
+          maxWidth: Math.max(1, width - 4),
+        });
+      }
+    }
+
+    this.pageWidgetsBurned = true;
+  }
+
+  private lookupOptionalDict(value: any): PDFDict | undefined {
+    if (!this.pdfDoc || !value) {
+      return undefined;
+    }
+
+    try {
+      if (value instanceof PDFDict) {
+        return value;
+      }
+
+      const lookedUp = this.pdfDoc.context.lookup(value);
+
+      if (lookedUp instanceof PDFDict) {
+        return lookedUp;
+      }
+
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private lookupOptionalArray(value: any): PDFArray | undefined {
+    if (!this.pdfDoc || !value) {
+      return undefined;
+    }
+
+    try {
+      if (value instanceof PDFArray) {
+        return value;
+      }
+
+      const lookedUp = this.pdfDoc.context.lookup(value);
+
+      if (lookedUp instanceof PDFArray) {
+        return lookedUp;
+      }
+
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private getValueByPath(data: Record<string, unknown>, path: string): unknown {
+    return path.split('.').reduce<unknown>((current, key) => {
+      if (
+        current &&
+        typeof current === 'object' &&
+        key in current
+      ) {
+        return (current as Record<string, unknown>)[key];
+      }
+
+      return undefined;
+    }, data);
+  }
+
+  private decodePdfText(value: any): string | undefined {
+    if (!value) {
+      return undefined;
+    }
+
+    if (typeof value.decodeText === 'function') {
+      return value.decodeText();
+    }
+
+    if (typeof value.asString === 'function') {
+      return value.asString();
+    }
+
+    if (typeof value.value === 'function') {
+      return value.value();
+    }
+
+    if (typeof value.value === 'string') {
+      return value.value;
+    }
+
+    return String(value).replace(/^\((.*)\)$/, '$1');
+  }
+
+  private readRect(rect: PDFArray | undefined): [number, number, number, number] | undefined {
+    if (!rect || typeof rect.size !== 'function' || rect.size() < 4) {
+      return undefined;
+    }
+
+    const values: number[] = [];
+
+    for (let i = 0; i < 4; i++) {
+      const item = rect.lookup(i) as any;
+
+      if (item && typeof item.asNumber === 'function') {
+        values.push(item.asNumber());
+      } else {
+        values.push(Number(item));
+      }
+    }
+
+    if (values.some((value) => !Number.isFinite(value))) {
+      return undefined;
+    }
+
+    return values as [number, number, number, number];
+  }
+
+  private removeWidgetAnnotationsAndAcroForm(): void {
+    if (!this.pdfDoc) {
+      return;
+    }
+
+    for (const page of this.pdfDoc.getPages()) {
+      const annots = (page.node as any).Annots?.();
+
+      if (!annots || typeof annots.size !== 'function') {
+        continue;
+      }
+
+      const keptAnnots = [];
+
+      for (let i = 0; i < annots.size(); i++) {
+        const annotRef = annots.get(i);
+        const annot = this.pdfDoc.context.lookup(annotRef) as PDFDict | undefined;
+
+        if (!annot) {
+          continue;
+        }
+
+        const subtype = annot.get(PDFName.of('Subtype'));
+
+        if (String(subtype) !== '/Widget') {
+          keptAnnots.push(annotRef);
+        }
+      }
+
+      if (keptAnnots.length === 0) {
+        page.node.delete(PDFName.of('Annots'));
+      } else {
+        page.node.set(
+          PDFName.of('Annots'),
+          this.pdfDoc.context.obj(keptAnnots),
+        );
+      }
+    }
+
+    this.pdfDoc.catalog.delete(PDFName.of('AcroForm'));
+  }
+
+  async fillEditablePageWidgets(
+    mapping: Array<{ dataKey: string; pdfField: string }>,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    if (!this.pdfDoc || !this.options.editablePageWidgets) {
+      return;
+    }
+
+    const font = await this.pdfDoc.embedFont(StandardFonts.Helvetica);
+    const valuesByPdfField = new Map<string, string>();
+
+    for (const entry of mapping) {
+      const value = this.getValueByPath(data, entry.dataKey);
+
+      if (value === undefined || value === null || value === '') {
+        continue;
+      }
+
+      valuesByPdfField.set(entry.pdfField, String(value));
+    }
+
+    for (const page of this.pdfDoc.getPages()) {
+      const annots = (page.node as any).Annots?.();
+
+      if (!annots || typeof annots.size !== 'function') {
+        continue;
+      }
+
+      for (let i = 0; i < annots.size(); i++) {
+        const annotRef = annots.get(i);
+        const annot = this.pdfDoc.context.lookup(annotRef) as PDFDict | undefined;
+
+        if (!annot) {
+          continue;
+        }
+
+        const subtype = annot.get(PDFName.of('Subtype'));
+
+        if (String(subtype) !== '/Widget') {
+          continue;
+        }
+
+        const parent = this.lookupOptionalDict(annot.get(PDFName.of('Parent')));
+
+        const fieldName =
+          this.decodePdfText(annot.get(PDFName.of('T'))) ||
+          this.decodePdfText(parent?.get(PDFName.of('T')));
+
+        if (!fieldName) {
+          continue;
+        }
+
+        const value = valuesByPdfField.get(fieldName);
+
+        if (!value) {
+          continue;
+        }
+
+        const rect = this.lookupOptionalArray(annot.get(PDFName.of('Rect')));
+        const coords = this.readRect(rect);
+
+        if (!coords) {
+          continue;
+        }
+
+        const [x0, y0, x1, y1] = coords;
+        const width = x1 - x0;
+        const height = y1 - y0;
+
+        if (width <= 0 || height <= 0) {
+          continue;
+        }
+
+        const pdfValue = PDFString.of(value);
+
+        // Valeur du champ
+        annot.set(PDFName.of('V'), pdfValue);
+
+        if (parent) {
+          parent.set(PDFName.of('V'), pdfValue);
+        }
+
+        // Apparence visible du champ
+        const appearanceRef = this.createTextWidgetAppearance(value, width, height, font);
+
+        annot.set(
+          PDFName.of('AP'),
+          this.pdfDoc.context.obj({
+            N: appearanceRef,
+          }),
+        );
+
+        // Apparence par défaut : Helvetica noir
+        const da = PDFString.of('/Helv 8 Tf 0 g');
+        annot.set(PDFName.of('DA'), da);
+
+        if (parent) {
+          parent.set(PDFName.of('DA'), da);
+        }
+      }
+    }
+  }
+
+  private createTextWidgetAppearance(
+    value: string,
+    width: number,
+    height: number,
+    font: any,
+  ) {
+    const fontSize = Math.max(6, Math.min(8, height * 0.72));
+    const y = Math.max(1.5, (height - fontSize) / 2);
+    const encodedText = font.encodeText(value).toString();
+
+    const content = [
+      'q',
+      '0.82 0.84 0.88 rg',
+      `0 0 ${width.toFixed(2)} ${height.toFixed(2)} re f`,
+      'BT',
+      '0 g',
+      `/Helv ${fontSize.toFixed(2)} Tf`,
+      `2 ${y.toFixed(2)} Td`,
+      `${encodedText} Tj`,
+      'ET',
+      'Q',
+    ].join('\n');
+
+    const appearance = this.pdfDoc!.context.flateStream(content, {
+      Type: 'XObject',
+      Subtype: 'Form',
+      FormType: 1,
+      BBox: [0, 0, width, height],
+      Resources: {
+        Font: {
+          Helv: font.ref,
+        },
+      },
+    });
+
+    return this.pdfDoc!.context.register(appearance);
+  }
+
   /**
    * Save the document and return the PDF bytes.
    *
@@ -195,18 +677,25 @@ export class PdfLibAdapter implements IPdfAdapter {
     if (!this.pdfDoc) {
       throw new PdfLoadError('No document loaded');
     }
-    // Regenerate field appearance streams so filled values are visible
-    // in viewers. Essential for PDFs with pre-existing appearances
-    // (e.g. forms created in Adobe Acrobat).
+
     const form = this.form;
+
     if (form) {
-      try {
-        form.updateFieldAppearances();
-      } catch {
-        // Non-fatal: some fonts or fields may not support appearance updates.
-        // The values are still stored in the field data.
+      if (this.options.flattenPdf) {
+        if (this.options.flattenStrategy === 'pdfLib') {
+          form.flatten({ updateFieldAppearances: true });
+        } else if (this.pageWidgetsBurned) {
+          this.removeWidgetAnnotationsAndAcroForm();
+        }
+      } else if (!this.options.editablePageWidgets) {
+        try {
+          form.updateFieldAppearances();
+        } catch {
+          // Non-fatal: some fields may not support appearance updates.
+        }
       }
     }
+
     return this.pdfDoc.save();
   }
 

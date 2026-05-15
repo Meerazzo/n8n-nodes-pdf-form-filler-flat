@@ -1,0 +1,56 @@
+diff --git a/node_modules/pdf-lib/cjs/api/form/PDFForm.js b/node_modules/pdf-lib/cjs/api/form/PDFForm.js
+index 9ea97a2..819f280 100644
+--- a/node_modules/pdf-lib/cjs/api/form/PDFForm.js
++++ b/node_modules/pdf-lib/cjs/api/form/PDFForm.js
+@@ -456,7 +456,10 @@ var PDFForm = /** @class */ (function () {
+             for (var j = 0, lenWidgets = widgets.length; j < lenWidgets; j++) {
+                 var widget = widgets[j];
+                 var page = this.findWidgetPage(widget);
+-                var widgetRef = this.findWidgetAppearanceRef(field, widget);
++                if (page === undefined) {
++                continue;
++            }
++            var widgetRef = this.findWidgetAppearanceRef(field, widget);
+                 var xObjectKey = page.node.newXObject('FlatWidget', widgetRef);
+                 var rectangle = widget.getRectangle();
+                 var operators = tslib_1.__spreadArrays([
+@@ -488,7 +491,10 @@ var PDFForm = /** @class */ (function () {
+             var widget = widgets[i];
+             var widgetRef = this.findWidgetAppearanceRef(field, widget);
+             var page = this.findWidgetPage(widget);
+-            pages.add(page);
++            if (page === undefined) {
++            continue;
++        }
++        pages.add(page);
+             page.node.removeAnnot(widgetRef);
+         }
+         pages.forEach(function (page) { return page.node.removeAnnot(field.ref); });
+diff --git a/node_modules/pdf-lib/es/api/form/PDFForm.js b/node_modules/pdf-lib/es/api/form/PDFForm.js
+index e82bb80..efd9e49 100644
+--- a/node_modules/pdf-lib/es/api/form/PDFForm.js
++++ b/node_modules/pdf-lib/es/api/form/PDFForm.js
+@@ -454,7 +454,10 @@ var PDFForm = /** @class */ (function () {
+             for (var j = 0, lenWidgets = widgets.length; j < lenWidgets; j++) {
+                 var widget = widgets[j];
+                 var page = this.findWidgetPage(widget);
+-                var widgetRef = this.findWidgetAppearanceRef(field, widget);
++                if (page === undefined) {
++                continue;
++            }
++            var widgetRef = this.findWidgetAppearanceRef(field, widget);
+                 var xObjectKey = page.node.newXObject('FlatWidget', widgetRef);
+                 var rectangle = widget.getRectangle();
+                 var operators = __spreadArrays([
+@@ -486,7 +489,10 @@ var PDFForm = /** @class */ (function () {
+             var widget = widgets[i];
+             var widgetRef = this.findWidgetAppearanceRef(field, widget);
+             var page = this.findWidgetPage(widget);
+-            pages.add(page);
++            if (page === undefined) {
++            continue;
++        }
++        pages.add(page);
+             page.node.removeAnnot(widgetRef);
+         }
+         pages.forEach(function (page) { return page.node.removeAnnot(field.ref); });

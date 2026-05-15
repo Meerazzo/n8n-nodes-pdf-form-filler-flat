@@ -1,17 +1,27 @@
 {
-	"node": "n8n-nodes-pdf-form-filler.pdfFormFiller",
-	"nodeVersion": "1.0",
-	"codexVersion": "1.0",
-	"categories": ["Utility"],
-	"subcategories": {
-		"Utility": ["Data Transformation"]
-	},
-	"resources": {
-		"primaryDocumentation": [
-			{
-				"url": "https://github.com/rainerg/n8n-nodes-pdf-form-filler#readme"
-			}
-		]
-	},
-	"alias": ["pdf", "form", "fill", "acroform", "document"]
+  "node": "n8n-nodes-pdf-form-filler-flat.pdfFormFillerFlat",
+  "nodeVersion": "1.0",
+  "codexVersion": "1.0",
+  "categories": [
+    "Utility"
+  ],
+  "subcategories": {
+    "Utility": [
+      "Data Transformation"
+    ]
+  },
+  "resources": {
+    "primaryDocumentation": [
+      {
+        "url": "https://github.com/davidwauthier/n8n-nodes-pdf-form-filler-flat#readme"
+      }
+    ]
+  },
+  "alias": [
+    "pdf",
+    "form",
+    "fill",
+    "acroform",
+    "document"
+  ]
 }

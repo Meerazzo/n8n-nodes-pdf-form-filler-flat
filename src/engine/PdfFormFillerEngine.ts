@@ -63,6 +63,11 @@ export class PdfFormFillerEngine {
   ): Promise<FillFormResult> {
     this.validateMapping(mapping);
     await this.adapter.loadDocument(pdfBytes);
+    const adapterWithPageHints = this.adapter as IPdfAdapter & {
+      setPageHints?: (mapping: FieldMappingEntry[]) => void;
+    };
+
+    adapterWithPageHints.setPageHints?.(mapping);
 
     const details: FieldFillResult[] = [];
     const warnings: string[] = [];
@@ -75,6 +80,24 @@ export class PdfFormFillerEngine {
         warnings.push(result.message);
       }
     }
+
+    const adapterWithPageBurn = this.adapter as IPdfAdapter & {
+      burnMappedValuesOntoPageWidgets?: (
+        mapping: FieldMappingEntry[],
+        data: Record<string, unknown>,
+      ) => Promise<void>;
+    };
+
+    await adapterWithPageBurn.burnMappedValuesOntoPageWidgets?.(mapping, data);
+
+    const adapterWithEditableWidgets = this.adapter as IPdfAdapter & {
+      fillEditablePageWidgets?: (
+        mapping: FieldMappingEntry[],
+        data: Record<string, unknown>,
+      ) => Promise<void>;
+    };
+
+    await adapterWithEditableWidgets.fillEditablePageWidgets?.(mapping, data);
 
     const pdfResultBytes = await this.adapter.saveDocument();
 
