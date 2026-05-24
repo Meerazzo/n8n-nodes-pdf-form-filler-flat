@@ -423,6 +423,51 @@ export class PdfLibAdapter implements IPdfAdapter {
     }
   }
 
+  private toPdfBoolean(value: unknown): boolean {
+    if (typeof value === 'boolean') {
+      return value;
+    }
+
+    const normalized = String(value ?? '')
+      .trim()
+      .toLowerCase();
+
+    return [
+      'true',
+      '1',
+      'yes',
+      'oui',
+      'on',
+      'checked',
+      'check',
+      'x',
+    ].includes(normalized);
+  }
+
+  private getWidgetOnStateName(annot: PDFDict): PDFName | undefined {
+    const ap = this.lookupOptionalDict(annot.get(PDFName.of('AP')));
+
+    if (!ap) {
+      return undefined;
+    }
+
+    const normalAppearance = this.lookupOptionalDict(ap.get(PDFName.of('N')));
+
+    if (!normalAppearance) {
+      return undefined;
+    }
+
+    const entries = normalAppearance.entries();
+
+    for (const [key] of entries) {
+      if (String(key) !== '/Off') {
+        return key as PDFName;
+      }
+    }
+
+    return undefined;
+  }
+
   private getValueByPath(data: Record<string, unknown>, path: string): unknown {
     return path.split('.').reduce<unknown>((current, key) => {
       if (
@@ -597,6 +642,29 @@ export class PdfLibAdapter implements IPdfAdapter {
         const height = y1 - y0;
 
         if (width <= 0 || height <= 0) {
+          continue;
+        }
+
+        const fieldType = String(
+          annot.get(PDFName.of('FT')) ??
+          parent?.get(PDFName.of('FT')),
+        );
+
+        if (fieldType === '/Btn') {
+          const checked = this.toPdfBoolean(value);
+          const fieldDict = parent ?? annot;
+
+          const onStateName = this.getWidgetOnStateName(annot) ?? PDFName.of('Yes');
+          const offStateName = PDFName.of('Off');
+
+          if (checked) {
+            fieldDict.set(PDFName.of('V'), onStateName);
+            annot.set(PDFName.of('AS'), onStateName);
+          } else {
+            fieldDict.set(PDFName.of('V'), offStateName);
+            annot.set(PDFName.of('AS'), offStateName);
+          }
+
           continue;
         }
 
